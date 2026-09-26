@@ -1,0 +1,15 @@
+# Add to libfprint/meson.build, inside driver_sources = { ... }:
+    'synaptics00a8' :
+        [ 'drivers/synaptics00a8/s00a8.c',
+          'drivers/synaptics00a8/s00a8-tls.c',
+          'drivers/synaptics00a8/s00a8-pair.c',
+          'drivers/synaptics00a8/s00a8-program.c',
+          'drivers/synaptics00a8/s00a8-image.c',
+          'drivers/synaptics00a8/s00a8-match.c',
+          'drivers/synaptics00a8/s00a8-program-data.c',
+          'drivers/synaptics00a8/s00a8-session-data.c',
+          'drivers/synaptics00a8/s00a8-config-data.c',
+          'drivers/synaptics00a8/s00a8-pair-data.c' ],
+
+# Add to meson.build: put 'synaptics00a8' in default_drivers,
+# and in driver_helper_mapping:  'synaptics00a8' : [ 'openssl' ],
