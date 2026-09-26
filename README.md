@@ -50,12 +50,27 @@ drivers carry vendor register tables. They are plain data, never executed.
 
 ## Security notes
 
-- Pairing is trust-on-first-use: the family-wide pairing secret is public,
-  so first pairing sets up the channel but does not prove the reader's
-  identity.
-- Captured frames are not authenticated end to end; the reader offers no
-  way to bind them to the secure channel. Both are properties of the
-  hardware, not of this driver.
+This driver behaves like every Linux driver for this sensor family
+(python-validity and the in-tree libfprint Synaptics drivers work the same
+way); the points below are properties of the hardware, not weaknesses
+introduced here. On Linux, fingerprint login is a convenience factor with
+the password always kept as a fallback — it is not meant to stop an
+attacker who has your opened-up laptop in hand.
+
+- **Pairing is trust-on-first-use, then pinned.** The certificate request
+  is signed with a constant shared across the whole sensor family, so the
+  *first* pairing sets up the encrypted channel without proving which
+  physical sensor answered. After that, the certificate and keys are stored
+  on disk and reused: a later swapped or foreign sensor does not have that
+  pairing and fails the handshake, so it is detected. Verifying the sensor
+  on the very first pairing would need a manufacturer-signed device key,
+  which the hardware does not expose.
+
+- **Image frames are not bound to the secure channel.** Commands run over
+  TLS, but the reader streams the raw image on a separate bulk endpoint
+  with no way to tie a frame to the session. An attacker who can physically
+  tap the USB bus could therefore replay recorded frames. There is no
+  software fix; it is how the sensor works.
 
 ## Status
 
