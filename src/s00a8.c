@@ -50,7 +50,6 @@ struct _FpiDeviceSynaptics00a8
   gboolean       have_factory_cal;
 
   FpiSsm        *task_ssm;
-  GCancellable  *interrupt;
 
   /* Capture loop working set (144 x 56 floats). */
   gfloat        *img;
@@ -75,7 +74,6 @@ struct _FpiDeviceSynaptics00a8
   guint          enroll_tries;
 
   FpiMatchResult verify_result;
-  FpPrint       *verify_print;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceSynaptics00a8, fpi_device_synaptics00a8, FPI,
@@ -120,7 +118,6 @@ typedef struct
   FpiSsm       *ssm;
   S00a8ReplyCb  cb;
   gpointer      cb_data;
-  const gchar  *label;
 } ExchangeCtx;
 
 static void
@@ -203,7 +200,7 @@ s00a8_exchange (FpiSsm *ssm, FpDevice *dev, const gchar *label,
   ctx->ssm = ssm;
   ctx->cb = cb;
   ctx->cb_data = cb_data;
-  ctx->label = label;
+  fp_dbg ("sending %s", label);
 
   out = fpi_usb_transfer_new (dev);
   fpi_usb_transfer_fill_bulk_full (out, S00A8_EP_CMD_OUT, record, record_len, g_free);
@@ -415,7 +412,7 @@ prep_run_state (FpiSsm *ssm, FpDevice *dev)
 static gchar *
 baseline_path (GUsbDevice *usb)
 {
-  return s00a8_device_state_path (usb, "baseline.bin");
+  return s00a8_device_state_path (usb, "capture-reference-v1.bin");
 }
 
 static void
@@ -427,16 +424,48 @@ remove_saved_baseline (GUsbDevice *usb)
     fp_warn ("cannot remove stale baseline %s: %s", path, g_strerror (errno));
 }
 
-/* With no trustworthy baseline, reject a stable startup frame that already
- * contains enough ridge structure to be a finger. */
+/* Persist the uncorrected calibration and the corrected baseline together.
+ * A corrected baseline is NOT a valid input for the sensor's 0x85 offsets.
+ * Old baseline.bin files lack that calibration and must not be reused. */
 static gboolean
-capture_finger_present (const gfloat *img)
+load_capture_reference (FpiDeviceSynaptics00a8 *self, GUsbDevice *usb)
 {
-  g_autofree gfloat *px = g_new (gfloat, S00A8_PIXELS);
-  g_autofree gint8 *tpl = g_new (gint8, S00A8_PIXELS);
+  g_autofree gchar *path = baseline_path (usb);
+  g_autofree gchar *saved = NULL;
+  const gsize size = S00A8_PIXELS * (sizeof (guint8) + sizeof (gfloat));
+  gsize len = 0;
 
-  s00a8_image_demux (img, NULL, px);
-  return s00a8_match_prepare (px, tpl) >= MIN_COVERAGE;
+  saved = s00a8_file_read_bounded (path, size, &len, NULL);
+  if (saved == NULL || len != size)
+    return FALSE;
+  for (guint i = 0; i < S00A8_PIXELS; i++)
+    {
+      gfloat value;
+      memcpy (&value, saved + S00A8_PIXELS + i * sizeof value, sizeof value);
+      if (!isfinite (value) || value < 0 || value > 255)
+        return FALSE;
+    }
+  memcpy (self->cal_frame, saved, S00A8_PIXELS);
+  memcpy (self->baseline, saved + S00A8_PIXELS, S00A8_PIXELS * sizeof (gfloat));
+  self->have_cal = TRUE;
+  self->have_baseline = TRUE;
+  fp_info ("loaded paired raw calibration and corrected baseline");
+  return TRUE;
+}
+
+static void
+save_capture_reference (FpiDeviceSynaptics00a8 *self, GUsbDevice *usb)
+{
+  g_autofree gchar *path = baseline_path (usb);
+  const gsize size = S00A8_PIXELS * (sizeof (guint8) + sizeof (gfloat));
+  g_autofree gchar *data = g_malloc (size);
+  g_autoptr(GError) error = NULL;
+
+  memcpy (data, self->cal_frame, S00A8_PIXELS);
+  memcpy (data + S00A8_PIXELS, self->baseline, S00A8_PIXELS * sizeof (gfloat));
+  if (!g_file_set_contents_full (path, data, size,
+                                  G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error))
+    fp_warn ("cannot save capture reference: %s", error->message);
 }
 
 static void capture_send (FpiSsm *ssm, FpDevice *dev);
@@ -470,7 +499,6 @@ static void
 capture_decide (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceSynaptics00a8 *self = FPI_DEVICE_SYNAPTICS00A8 (dev);
-  g_autofree gfloat *saved_baseline = NULL;
   gdouble change, diff;
 
   change = self->have_previous ? s00a8_image_difference (self->img, self->previous) : 1e9;
@@ -478,61 +506,9 @@ capture_decide (FpiSsm *ssm, FpDevice *dev)
   memcpy (self->previous, self->img, S00A8_PIXELS * sizeof (gfloat));
   self->have_previous = TRUE;
 
-  if (!self->have_baseline)
-    {
-      g_autofree gchar *path = baseline_path (fpi_device_get_usb_device (dev));
-      g_autofree gchar *saved = NULL;
-      gsize saved_len = 0;
-      gboolean valid = FALSE;
-
-      saved = s00a8_file_read_bounded (path, S00A8_PIXELS * sizeof (gfloat),
-                                       &saved_len, NULL);
-      if (saved != NULL &&
-          saved_len == S00A8_PIXELS * sizeof (gfloat))
-        {
-          const gfloat *samples = (const gfloat *) saved;
-
-          valid = TRUE;
-          for (guint i = 0; i < S00A8_PIXELS; i++)
-            if (!isfinite (samples[i]) || samples[i] < 0 || samples[i] > 255)
-              {
-                valid = FALSE;
-                break;
-              }
-          if (valid)
-            saved_baseline = g_memdup2 (saved, saved_len);
-        }
-
-      if (saved_baseline)
-        {
-          diff = s00a8_image_difference (self->img, saved_baseline);
-          if (diff < PRESENT_DIFF)
-            {
-              memcpy (self->baseline, saved_baseline, S00A8_PIXELS * sizeof (gfloat));
-              self->have_baseline = TRUE;
-            }
-          else if (self->stable == 1)
-            {
-              if (capture_finger_present (self->img))
-                memcpy (self->baseline, saved_baseline, S00A8_PIXELS * sizeof (gfloat));
-              else
-                {
-                  memcpy (self->baseline, self->img, S00A8_PIXELS * sizeof (gfloat));
-                  g_file_set_contents (path, (const gchar *) self->baseline,
-                                       S00A8_PIXELS * sizeof (gfloat), NULL);
-                }
-              self->have_baseline = TRUE;
-            }
-        }
-    }
-
   if (!self->have_cal)
     {
-      gboolean finger_present = FALSE;
-
-      if (self->stable == 1 && !self->have_baseline)
-        finger_present = capture_finger_present (self->img);
-      if (self->stable == 1 && !finger_present &&
+      if (self->stable == 1 &&
           (!self->have_baseline ||
            s00a8_image_difference (self->img, self->baseline) < PRESENT_DIFF))
         {
@@ -541,6 +517,7 @@ capture_decide (FpiSsm *ssm, FpDevice *dev)
           self->have_cal = TRUE;
           self->have_previous = FALSE;
           self->stable = 0;
+          fp_info ("capture calibration acquired");
         }
       capture_schedule (ssm, dev);
       return;
@@ -548,14 +525,12 @@ capture_decide (FpiSsm *ssm, FpDevice *dev)
 
   if (!self->have_baseline)
     {
-      g_autofree gchar *path = baseline_path (fpi_device_get_usb_device (dev));
-
-      if (self->stable >= 1 && !capture_finger_present (self->img))
+      if (self->stable >= 1)
         {
           memcpy (self->baseline, self->img, S00A8_PIXELS * sizeof (gfloat));
           self->have_baseline = TRUE;
-          g_file_set_contents (path, (const gchar *) self->baseline,
-                               S00A8_PIXELS * sizeof (gfloat), NULL);
+          save_capture_reference (self, fpi_device_get_usb_device (dev));
+          fp_info ("capture baseline acquired");
           fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
         }
       capture_schedule (ssm, dev);
@@ -747,9 +722,13 @@ capture_start (FpiSsm *ssm, FpDevice *dev, gint done_state)
       self->cal_frame = g_new0 (guint8, S00A8_PIXELS);
       self->template = g_new0 (gint8, S00A8_PIXELS);
     }
+  if (!self->have_cal && !self->have_baseline)
+    load_capture_reference (self, fpi_device_get_usb_device (dev));
   self->done_state = done_state;
   if (!self->await_lift)
-    fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
+    fpi_device_report_finger_status (dev,
+        self->have_cal && self->have_baseline ? FP_FINGER_STATUS_NEEDED
+                                              : FP_FINGER_STATUS_NONE);
   capture_send (ssm, dev);
 }
 
@@ -1235,7 +1214,7 @@ dev_probe (FpDevice *dev)
   serial = g_usb_device_get_string_descriptor (usb,
               g_usb_device_get_serial_number_index (usb), NULL);
   g_usb_device_close (usb, NULL);
-  fpi_device_probe_complete (dev, serial ? serial : g_strdup ("unknown"), NULL, NULL);
+  fpi_device_probe_complete (dev, serial ? serial : "unknown", NULL, NULL);
 }
 
 /* ---- GObject ------------------------------------------------------------ */

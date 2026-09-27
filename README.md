@@ -46,37 +46,66 @@ finger in your desktop's fingerprint settings and use it for login and
 These hold constant values the reader needs to run — its capture program,
 register setup and scan configuration. They were recovered by reverse
 engineering the vendor driver for interoperability, the way other libfprint
-drivers carry vendor register tables. They are plain data, never executed.
+drivers carry vendor register tables. They are data in the host library; some encode instructions interpreted by
+the sensor. No vendor DLL is loaded or executed on the host.
+
+## Calibration and upgrades
+
+The driver stores the raw calibration frame and its corrected empty-sensor
+baseline together in `capture-reference-v1.bin`, next to the device pairing.
+Inside fprintd this is under `/var/lib/fprint/synaptics-06cb-00a8/devices/`;
+outside fprintd it uses the user's libfprint data directory. Keep these
+private state directories owned by the account running the driver.
+
+Legacy `baseline.bin` files are ignored: they do not contain the raw
+calibration needed to reproduce the original image. On the first use after
+upgrading, leave the sensor empty for initial calibration before placing a
+finger. Existing enrolled fingerprints and pairing keys are preserved.
 
 ## Security notes
 
-This driver behaves like every Linux driver for this sensor family
-(python-validity and the in-tree libfprint Synaptics drivers work the same
-way); the points below are properties of the hardware, not weaknesses
-introduced here. On Linux, fingerprint login is a convenience factor with
-the password always kept as a fallback — it is not meant to stop an
-attacker who has your opened-up laptop in hand.
+This is an experimental driver and custom biometric matcher, not a certified
+authentication system. See [SECURITY.md](SECURITY.md) for the threat model,
+review results and remaining limitations.
 
-- **Pairing is trust-on-first-use, then pinned.** The certificate request
-  is signed with a constant shared across the whole sensor family, so the
-  *first* pairing sets up the encrypted channel without proving which
-  physical sensor answered. After that, the certificate and keys are stored
-  on disk and reused: a later swapped or foreign sensor does not have that
-  pairing and fails the handshake, so it is detected. Verifying the sensor
-  on the very first pairing would need a manufacturer-signed device key,
-  which the hardware does not expose.
+- Pairing uses a sensor-family signing constant and trusts the sensor key
+  obtained during first pairing. Subsequent handshakes check possession of
+  the saved sensor key. This does not establish manufacturer authenticity
+  on first use. Do not delete pairing state automatically on handshake failure.
+- Image frames arrive on a separate USB endpoint without cryptographic
+  authentication or a binding to the command channel. Physical USB access
+  can permit image injection or replay. No liveness detection is implemented.
+- The sensor's TLS-like protocol omits record sequence numbers from its
+  MAC, so authenticated records have no per-record replay protection within
+  a session. It is not interchangeable with a standard TLS implementation.
+- Matching thresholds were tuned on a small sample. A population-level
+  false-accept rate has not been established. Keep password fallback available
+  and do not rely on this driver for high-assurance biometric authentication.
 
-- **Image frames are not bound to the secure channel.** Commands run over
-  TLS, but the reader streams the raw image on a separate bulk endpoint
-  with no way to tie a frame to the session. An attacker who can physically
-  tap the USB bus could therefore replay recorded frames. There is no
-  software fix; it is how the sensor works.
+## Tests
+
+The hardware-independent regression suite compiles the production helpers
+with AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```bash
+# Debian build dependencies for the standalone tests
+sudo apt install clang pkg-config libglib2.0-dev libgusb-dev libssl-dev python3
+./tests/run.sh
+```
+
+Use `SANITIZE=0 CC=gcc ./tests/run.sh` for an ordinary GCC build. Tests use
+synthetic data and temporary files; they do not access the scanner or stored
+fingerprints. The cache test extracts the actual helper functions from the
+driver because the rest of that file requires libfprint's device lifecycle.
 
 ## Status
 
-Pairing, the secure channel, capture, enrol and verify run on real
-hardware. The matching thresholds were tuned on a small sample; the
-false-accept rate is not yet measured widely.
+Pairing, capture, enrolment and fingerprint verification have been exercised
+on one real 06cb:00a8 device. The calibration fix passed two empty-sensor tests,
+a subsequent successful fingerprint verification and user confirmation of
+working authentication. The additional parser hardening and cleanup pass
+standalone regression tests and a full libfprint build; they have not received
+a separate hardware run. See the review record in [SECURITY.md](SECURITY.md).
 
 ## License
 

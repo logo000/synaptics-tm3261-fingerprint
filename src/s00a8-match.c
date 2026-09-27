@@ -836,7 +836,8 @@ s00a8_aligner_finish (S00a8Aligner *al, gdouble *poses_out)
         memcpy (o + 5, pose[i].b, 2 * sizeof (gdouble));
       }
   md = model_render (tpls, n, island, pose);
-  fp_dbg ("match33: model of %u templates in %u islands", n, md->n_islands);
+  if (md != NULL)
+    fp_dbg ("match33: model of %u templates in %u islands", n, md->n_islands);
   return md;
 }
 

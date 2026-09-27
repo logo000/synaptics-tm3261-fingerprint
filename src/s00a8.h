@@ -148,7 +148,6 @@ extern const guint8 validity_init_msg4_payload[VALIDITY_INIT_MSG4_PAYLOAD_LEN];
 
 #define VALIDITY_ENROLL_HOSTPART_BLOB_LEN  10500
 extern const guint8 validity_enroll_hostpart_blob[VALIDITY_ENROLL_HOSTPART_BLOB_LEN];
-extern const guint8 validity_enroll_hostpart_blob_clean_slate[VALIDITY_ENROLL_HOSTPART_BLOB_LEN];
 
 /* s00a8-pair-data.c: the 5796 byte session payload used only while
  * pairing a sensor that has no pairing with this host yet. */

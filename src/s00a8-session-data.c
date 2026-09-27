@@ -1,9 +1,9 @@
 /*
- * validity-init-data.c - Kensington VeriMark (06CB:0088)
+ * s00a8-session-data.c - Synaptics 06cb:00a8 session setup
  *
  * The 660-byte INIT_MSG4 payload (wire opcode 0x06), replayed verbatim
  * during the plaintext init phase on already-paired devices.
- * Static per-device-family blob - same bytes on every 0088 device.
+ * Shared sensor-family payload, validated on the 00a8 device.
  *
  * SHA-256: 6cb583ca692e5e44cfae58ee0d450ea0c224d34eee014f3e39708ec713e6e7c2
  *

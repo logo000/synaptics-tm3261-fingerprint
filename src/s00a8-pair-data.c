@@ -1,9 +1,9 @@
 /*
- * validity-init-clean-slate.c - INIT_MSG4 clean-slate variant payload (5796 B).
+ * s00a8-pair-data.c - INIT_MSG4 fresh-pairing payload (5796 B).
  *
  * Sent as `0x06 + this_payload` during the pre-TLS fresh-pair ceremony
  * to put the device into "will accept a fresh CSR via 0x4f" state.
- * Static protocol blob - identical for every 0088 device.
+ * Shared sensor-family payload, validated on the 00a8 device.
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */

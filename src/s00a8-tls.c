@@ -224,14 +224,16 @@ encrypt_record (S00a8Tls *tls, guint8 type,
                 const guint8 *plain, gsize plain_len,
                 gsize *out_len)
 {
-  gsize pad = AES_BLOCK - (plain_len + MAC_LEN) % AES_BLOCK;   /* 1..16 */
-  gsize body_len = plain_len + MAC_LEN + pad;
-  gsize frag_len = AES_BLOCK + body_len;
+  gsize pad, body_len, frag_len;
   g_autofree guint8 *body = NULL;
   guint8 *rec;
 
-  if (frag_len > MAX_FRAGMENT)
+  /* Check before adding overhead: even a SIZE_MAX input must fail safely. */
+  if (plain_len > MAX_FRAGMENT - AES_BLOCK - MAC_LEN - AES_BLOCK)
     return NULL;
+  pad = AES_BLOCK - (plain_len + MAC_LEN) % AES_BLOCK;
+  body_len = plain_len + MAC_LEN + pad;
+  frag_len = AES_BLOCK + body_len;
 
   body = g_malloc (body_len);
   memcpy (body, plain, plain_len);
@@ -452,7 +454,11 @@ client_hello (S00a8Tls *tls)
   g_byte_array_append (body, extensions, sizeof (extensions));
 
   append_hs (hs, HS_CLIENT_HELLO, body->data, body->len);
-  transcript_add (tls, hs->data, hs->len);
+  if (!transcript_add (tls, hs->data, hs->len))
+    {
+      g_byte_array_unref (out);
+      return NULL;
+    }
 
   g_byte_array_append (out, flight_prefix, sizeof (flight_prefix));
   append_record (out, CT_HANDSHAKE, hs->data, hs->len);
@@ -488,15 +494,20 @@ parse_server_flight (S00a8Tls *tls, const guint8 *rsp, gsize rsp_len, GError **e
 
       if (off + HS_HEADER + mlen > len)
         break;
-      transcript_add (tls, rsp + off, HS_HEADER + mlen);
+      if (!transcript_add (tls, rsp + off, HS_HEADER + mlen))
+        {
+          g_propagate_error (error, proto_error ("handshake hash update failed"));
+          return FALSE;
+        }
 
       switch (type)
         {
         case HS_SERVER_HELLO:
           /* version, random, session id, suite, compression */
-          if (mlen < 35 || get_be16 (m) != TLS_VERSION ||
+          if (hello || request || done || mlen < 35 || get_be16 (m) != TLS_VERSION ||
               35 + (gsize) m[34] + 3 > mlen ||
-              get_be16 (m + 35 + m[34]) != CIPHER_SUITE)
+              get_be16 (m + 35 + m[34]) != CIPHER_SUITE ||
+              m[37 + m[34]] != 0)
             {
               g_propagate_error (error, proto_error ("unexpected ServerHello"));
               return FALSE;
@@ -506,10 +517,20 @@ parse_server_flight (S00a8Tls *tls, const guint8 *rsp, gsize rsp_len, GError **e
           break;
 
         case HS_CERTIFICATE_REQUEST:
+          if (!hello || request || done)
+            {
+              g_propagate_error (error, proto_error ("unexpected CertificateRequest order"));
+              return FALSE;
+            }
           request = TRUE;
           break;
 
         case HS_SERVER_HELLO_DONE:
+          if (!hello || !request || done || mlen != 0)
+            {
+              g_propagate_error (error, proto_error ("unexpected ServerHelloDone"));
+              return FALSE;
+            }
           done = TRUE;
           break;
 
@@ -672,13 +693,15 @@ client_flight (S00a8Tls *tls, const S00a8Pairing *pairing, EVP_PKEY *eph,
     goto fail;
   append_hs (hs, HS_CLIENT_KEY_EXCHANGE, cke, sizeof (cke));
 
-  transcript_add (tls, hs->data, hs->len);
+  if (!transcript_add (tls, hs->data, hs->len))
+    goto fail;
   if (!transcript_hash (tls, digest) ||
       (sig = ecdsa_sign_digest (pairing->host_key, digest, &sig_len)) == NULL)
     goto fail;
   mark = hs->len;
   append_hs (hs, HS_CERTIFICATE_VERIFY, sig, sig_len);
-  transcript_add (tls, hs->data + mark, hs->len - mark);
+  if (!transcript_add (tls, hs->data + mark, hs->len - mark))
+    goto fail;
 
   put_be24 (finished + 1, VERIFY_DATA_LEN);
   if (!transcript_hash (tls, digest) ||
@@ -793,6 +816,11 @@ s00a8_tls_handshake (GUsbDevice *usb, GCancellable *cancellable, S00a8Tls *tls,
   tls->client_random[3] = now;
 
   hello = client_hello (tls);
+  if (hello == NULL)
+    {
+      g_propagate_error (error, proto_error ("handshake hash update failed"));
+      goto out;
+    }
   if (!s00a8_usb_exchange (usb, cancellable, hello->data, hello->len,
                            rsp, S00A8_MAX_RESPONSE,
                            &rsp_len, error) ||

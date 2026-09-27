@@ -95,12 +95,13 @@ put_u32 (GByteArray *out, guint32 v)
 static gsize
 ts_insn (const guint8 *b, gsize avail, guint *op, guint32 *reg)
 {
-  guint8 c = b[0];
+  guint8 c;
 
   *op = 0;
   *reg = 0;
   if (avail == 0)
     return 0;
+  c = b[0];
   if (c <= 4)                     { *op = c;  return 1; }
   if (c >= 5 && c <= 7)           { *op = c;  return 2; }
   if ((c & 0xfe) == 0x08)         { *op = 8;  return 2; }
