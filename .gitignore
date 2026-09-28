@@ -1,3 +1,6 @@
 build/
 *.o
 *.so
+
+# Keep local validation tools out of the published repository.
+/tests/

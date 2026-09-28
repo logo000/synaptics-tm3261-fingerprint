@@ -82,21 +82,10 @@ review results and remaining limitations.
   false-accept rate has not been established. Keep password fallback available
   and do not rely on this driver for high-assurance biometric authentication.
 
-## Tests
+## Validation
 
-The hardware-independent regression suite compiles the production helpers
-with AddressSanitizer and UndefinedBehaviorSanitizer:
-
-```bash
-# Debian build dependencies for the standalone tests
-sudo apt install clang pkg-config libglib2.0-dev libgusb-dev libssl-dev python3
-./tests/run.sh
-```
-
-Use `SANITIZE=0 CC=gcc ./tests/run.sh` for an ordinary GCC build. Tests use
-synthetic data and temporary files; they do not access the scanner or stored
-fingerprints. The cache test extracts the actual helper functions from the
-driver because the rest of that file requires libfprint's device lifecycle.
+Build and regression checks are performed locally. Test tools are not included
+in this repository.
 
 ## Status
 

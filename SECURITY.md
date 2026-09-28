@@ -42,7 +42,7 @@ or a biometric certification.
 
 ## Validation results
 
-`tests/run.sh` checks:
+The local regression suite (not included in this repository) checks:
 
 - TLS record round trips over all plaintext sizes 0–255, ciphertext tampering,
   short records, extreme lengths, duplicate/out-of-order handshake messages,
