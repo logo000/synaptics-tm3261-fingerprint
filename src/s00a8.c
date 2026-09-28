@@ -1028,8 +1028,6 @@ verify_run_state (FpiSsm *ssm, FpDevice *dev)
         fpi_ssm_next_state (ssm);
         break;
       }
-        break;
-      }
     }
 }
 
@@ -1054,7 +1052,8 @@ verify_done_cb (FpiSsm *ssm, FpDevice *dev, GError *error)
             error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
                                                "could not create scanned print");
           else
-            fpi_device_identify_report (dev, self->identify_match, scanned, NULL);
+            fpi_device_identify_report (dev, self->identify_match,
+                                        g_steal_pointer (&scanned), NULL);
         }
       self->identify_match = NULL;
       fpi_device_identify_complete (dev, error);

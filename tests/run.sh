@@ -18,3 +18,4 @@ for unit in tls image-program match pair; do
   "$build/$unit"
 done
 python3 tests/test-capture-reference.py
+python3 tests/test-identify-lifetime.py
