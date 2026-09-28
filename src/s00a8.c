@@ -74,6 +74,7 @@ struct _FpiDeviceSynaptics00a8
   guint          enroll_tries;
 
   FpiMatchResult verify_result;
+  FpPrint       *identify_match; /* Borrowed from the active gallery. */
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceSynaptics00a8, fpi_device_synaptics00a8, FPI,
@@ -805,6 +806,29 @@ load_model (FpPrint *print, GError **error)
   return model;
 }
 
+/* Identify must return the scanned print even if none of the enrolled
+ * templates match, so libfprint can use it for duplicate detection. */
+static FpPrint *
+make_scanned_print (FpDevice *dev, const gint8 *tpl)
+{
+  g_autofree gdouble *poses = g_new (gdouble, S00A8_POSE_LEN);
+  g_autoptr(GByteArray) templates = g_byte_array_new ();
+  g_autoptr(S00a8Aligner) aligner = s00a8_aligner_new ();
+  g_autoptr(S00a8Model) model = NULL;
+  FpPrint *print = fp_print_new (dev);
+
+  g_byte_array_append (templates, (const guint8 *) tpl, S00A8_PIXELS);
+  s00a8_aligner_add (aligner, tpl);
+  model = s00a8_aligner_finish (aligner, poses);
+  if (model == NULL)
+    {
+      g_object_unref (print);
+      return NULL;
+    }
+  store_templates (print, templates, poses, 1);
+  return print;
+}
+
 /* ---- enrolment ---------------------------------------------------------- */
 
 enum { ENROLL_PREP, ENROLL_CAPTURE, ENROLL_COMMIT, ENROLL_STATES_N };
@@ -927,7 +951,6 @@ verify_run_state (FpiSsm *ssm, FpDevice *dev)
     case VERIFY_MATCH:
       {
         g_autoptr(GError) error = NULL;
-        g_autoptr(S00a8Model) model = NULL;
         FpPrint *enrolled = NULL;
         gdouble score, self_score, norm;
 
@@ -938,22 +961,73 @@ verify_run_state (FpiSsm *ssm, FpDevice *dev)
                 "Please place the finger flat and centred"));
             return;
           }
-        fpi_device_get_verify_data (dev, &enrolled);
-        model = load_model (enrolled, &error);
-        if (model == NULL)
+
+        if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_IDENTIFY)
           {
-            fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-            return;
+            GPtrArray *prints = NULL;
+
+            fpi_device_get_identify_data (dev, &prints);
+            self->verify_result = FPI_MATCH_FAIL;
+            for (guint i = 0; i < prints->len; i++)
+              {
+                g_autoptr(S00a8Model) model = NULL;
+
+                if (g_cancellable_set_error_if_cancelled (
+                        fpi_device_get_cancellable (dev), &error))
+                  {
+                    self->verify_result = FPI_MATCH_ERROR;
+                    break;
+                  }
+                enrolled = g_ptr_array_index (prints, i);
+                model = load_model (enrolled, &error);
+                if (model == NULL)
+                  {
+                    self->verify_result = FPI_MATCH_ERROR;
+                    break;
+                  }
+                score = s00a8_model_score (model, self->template);
+                self_score = s00a8_match_self_score (self->template);
+                norm = (score - self_score) / MAX (1 - self_score, 1e-3);
+                self->verify_result = (score >= MATCH_THRESHOLD && norm >= NORM_THRESHOLD)
+                                      ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL;
+                fp_info ("identify score %.3f self %.3f norm %.3f -> %s",
+                         score, self_score, norm,
+                         self->verify_result == FPI_MATCH_SUCCESS ? "match" : "no match");
+                if (self->verify_result == FPI_MATCH_SUCCESS)
+                  {
+                    self->identify_match = enrolled;
+                    break;
+                  }
+              }
+            if (self->verify_result == FPI_MATCH_ERROR)
+              {
+                fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+                return;
+              }
           }
-        score = s00a8_model_score (model, self->template);
-        self_score = s00a8_match_self_score (self->template);
-        norm = (score - self_score) / MAX (1 - self_score, 1e-3);
-        self->verify_result = (score >= MATCH_THRESHOLD && norm >= NORM_THRESHOLD)
-                              ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL;
-        fp_info ("verify score %.3f self %.3f norm %.3f -> %s",
-                 score, self_score, norm,
-                 self->verify_result == FPI_MATCH_SUCCESS ? "match" : "no match");
+        else
+          {
+            g_autoptr(S00a8Model) model = NULL;
+
+            fpi_device_get_verify_data (dev, &enrolled);
+            model = load_model (enrolled, &error);
+            if (model == NULL)
+              {
+                fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+                return;
+              }
+            score = s00a8_model_score (model, self->template);
+            self_score = s00a8_match_self_score (self->template);
+            norm = (score - self_score) / MAX (1 - self_score, 1e-3);
+            self->verify_result = (score >= MATCH_THRESHOLD && norm >= NORM_THRESHOLD)
+                                  ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL;
+            fp_info ("verify score %.3f self %.3f norm %.3f -> %s",
+                     score, self_score, norm,
+                     self->verify_result == FPI_MATCH_SUCCESS ? "match" : "no match");
+          }
         fpi_ssm_next_state (ssm);
+        break;
+      }
         break;
       }
     }
@@ -965,6 +1039,27 @@ verify_done_cb (FpiSsm *ssm, FpDevice *dev, GError *error)
   FpiDeviceSynaptics00a8 *self = FPI_DEVICE_SYNAPTICS00A8 (dev);
 
   self->task_ssm = NULL;
+
+  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_IDENTIFY)
+    {
+      if (error && error->domain == FP_DEVICE_RETRY)
+        {
+          fpi_device_identify_report (dev, NULL, NULL, error);
+          error = NULL;
+        }
+      else if (!error)
+        {
+          g_autoptr(FpPrint) scanned = make_scanned_print (dev, self->template);
+          if (scanned == NULL)
+            error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                               "could not create scanned print");
+          else
+            fpi_device_identify_report (dev, self->identify_match, scanned, NULL);
+        }
+      self->identify_match = NULL;
+      fpi_device_identify_complete (dev, error);
+      return;
+    }
 
   if (error)
     {
@@ -989,6 +1084,17 @@ dev_verify (FpDevice *dev)
   FpiDeviceSynaptics00a8 *self = FPI_DEVICE_SYNAPTICS00A8 (dev);
 
   self->verify_result = FPI_MATCH_ERROR;
+  self->task_ssm = fpi_ssm_new (dev, verify_run_state, VERIFY_STATES_N);
+  fpi_ssm_start (self->task_ssm, verify_done_cb);
+}
+
+static void
+dev_identify (FpDevice *dev)
+{
+  FpiDeviceSynaptics00a8 *self = FPI_DEVICE_SYNAPTICS00A8 (dev);
+
+  self->verify_result = FPI_MATCH_ERROR;
+  self->identify_match = NULL;
   self->task_ssm = fpi_ssm_new (dev, verify_run_state, VERIFY_STATES_N);
   fpi_ssm_start (self->task_ssm, verify_done_cb);
 }
@@ -1257,6 +1363,7 @@ fpi_device_synaptics00a8_class_init (FpiDeviceSynaptics00a8Class *klass)
   dev_class->nr_enroll_stages = ENROLL_STAGES;
   dev_class->temp_hot_seconds = -1;
   dev_class->features = FP_DEVICE_FEATURE_VERIFY |
+                        FP_DEVICE_FEATURE_IDENTIFY |
                         FP_DEVICE_FEATURE_ALWAYS_ON;
 
   dev_class->probe = dev_probe;
@@ -1264,4 +1371,5 @@ fpi_device_synaptics00a8_class_init (FpiDeviceSynaptics00a8Class *klass)
   dev_class->close = dev_close;
   dev_class->enroll = dev_enroll;
   dev_class->verify = dev_verify;
+  dev_class->identify = dev_identify;
 }
